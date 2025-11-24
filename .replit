@@ -1,1 +1,1 @@
-run = "python bot.py"
+run = "python TestApi.py"
