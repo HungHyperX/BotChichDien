@@ -2,15 +2,15 @@
 from discord.ext import commands
 import requests
 from datetime import datetime, timezone, timedelta
+from flask import Flask
+from threading import Thread
 
 # Cấu hình intents
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True  # nếu cần
+intents.members = True
 
-# Prefix lệnh là !
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
-
 API_URL = "https://uma.moe/api/circles?circle_id={}"
 
 @bot.event
@@ -20,72 +20,93 @@ async def on_ready():
 
 @bot.command(name="checkcircle", aliases=["cc", "circle"])
 async def checkcircle(ctx, circle_id: int):
-    """Kiểm tra daily_fans của Club """
-    await ctx.send(f"Đang kiểm tra Club `{circle_id}`... ⏳")
+    """Kiểm tra daily_fans của Circle + sắp xếp theo diff giảm dần"""
+    await ctx.send(f"Đang kiểm tra Circle `{circle_id}`...")
 
     try:
         url = API_URL.format(circle_id)
         response = requests.get(url, timeout=10)
-        
         if response.status_code != 200:
             await ctx.send(f"Lỗi API: {response.status_code}")
             return
-            
+
         data = response.json()
-        
-        # Kiểm tra xem có dữ liệu không
         if not data or "members" not in data or not data["members"]:
             await ctx.send("Không tìm thấy circle hoặc không có thành viên.")
             return
 
         members = data["members"]
-        today = datetime.now(timezone.utc).date()  # Ngày hôm nay theo UTC
-        msg = f"**Kết quả Circle {circle_id} - Ngày {today.day - 1}/{today.month}**\n\n"
+        today = datetime.now(timezone.utc).date()
+        name_club = data["circle"]["name"]
 
-        found_any = False
+        # Danh sách tạm để lưu thông tin mỗi thành viên
+        results = []
+
         for mem in members:
             name = mem.get("trainer_name", "Unknown")
             daily = mem.get("daily_fans", [])
             updated_str = mem.get("last_updated", "")
+            
 
             if not updated_str or len(daily) < 2:
                 continue
 
-            # Parse thời gian cập nhật
             try:
                 updated_dt = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
             except:
                 continue
 
-            # Chỉ lấy dữ liệu nếu được cập nhật hôm nay hoặc hôm qua
+            # Chỉ lấy dữ liệu hôm nay hoặc hôm qua
             if updated_dt.date() not in (today, today - timedelta(days=1)):
                 continue
 
-            # Tìm index tương ứng với hôm nay
-            latest_day = updated_dt.day
-            idx = latest_day - 1  # vì mảng bắt đầu từ index 0
-
+            idx = updated_dt.day - 1
             if idx <= 0 or idx >= len(daily):
                 continue
 
             current_fans = daily[idx]
             previous_fans = daily[idx - 1] if idx > 0 else 0
             diff = current_fans - previous_fans
-            found_any = True
 
+            # Icon + thông báo
             if diff < 500_000:
-                msg += f"⚠️ **{name}**: Chỉ cày được `{diff:,}` fans nên sẽ bị chích điện\n"
+                signal = f"⚠️"
+                status = f"Chỉ cày được `{diff:,}` fans nên sẽ bị chích điện"
             else:
-                msg += f"✅ **{name}**: đã thoát được hôm nay với `{diff:,}` fans\n"
+                signal = f"✅"
+                status = f"đã thoát được hôm nay với `{diff:,}` fans"
 
-        if not found_any:
-            msg += "Không có thành viên nào được cập nhật hôm nay hoặc dữ liệu chưa đủ."
+            results.append({
+                "signal": signal,
+                "name": name,
+                "diff": diff,
+                "status": status
+            })
 
-        # Chia tin nhắn nếu quá dài
+        if not results:
+            await ctx.send("Không có thành viên nào được cập nhật hôm nay hoặc dữ liệu chưa đủ.")
+            return
+
+        # Sắp xếp theo diff giảm dần (người cày nhiều nhất lên đầu)
+        results.sort(key=lambda x: x["diff"], reverse=True)
+
+        # Tạo tin nhắn
+        msg = f"**Kết quả Club {name_club} {circle_id} - Ngày {today.day - 1}/{today.month}**\n\n"
+        for i, r in enumerate(results, 1):
+            msg += f"`{i:2}.` **{r['signal']}** **{r['name']}**: {r['status']}\n"
+
+        # Chia nhỏ nếu quá dài
         if len(msg) > 1900:
-            parts = [msg[i:i+1900] for i in range(0, len(msg), 1900)]
-            for part in parts:
-                await ctx.send(part)
+            lines = msg.split('\n')
+            chunk = ""
+            for line in lines:
+                if len(chunk) + len(line) + 1 > 1900:
+                    await ctx.send(chunk)
+                    chunk = line + "\n"
+                else:
+                    chunk += line + "\n"
+            if chunk:
+                await ctx.send(chunk)
         else:
             await ctx.send(msg)
 
@@ -93,9 +114,24 @@ async def checkcircle(ctx, circle_id: int):
         await ctx.send(f"Lỗi kết nối API: {e}")
     except Exception as e:
         await ctx.send(f"Lỗi không xác định: {e}")
-        print(e)  # in ra console để debug
+        print(e)
 
-# Thay TOKEN của bạn vào đây
+# Keep alive cho Replit
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot đang online!"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.start()
+
+keep_alive()
+
+# Chạy bot
 import os
-TOKEN = os.getenv("DISCORD_TOKEN")
-bot.run(TOKEN)
+bot.run(os.getenv("DISCORD_TOKEN"))
